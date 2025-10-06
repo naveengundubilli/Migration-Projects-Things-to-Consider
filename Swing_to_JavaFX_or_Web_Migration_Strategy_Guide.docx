@@ -1,0 +1,124 @@
+1. **Intent check:** You want a concise, practical checklist of what to consider when upgrading a legacy Java Swing app to either JavaFX or a web-based UI.
+
+2. **Plan:**
+
+* Map the current state (inventory, risks, dependencies) and choose a target UX/runtime (JavaFX vs Web) with a decision matrix.
+* Define a migration strategy (strangler pattern, module boundaries, test harness) and handle cross-cutting concerns (security, packaging, CI/CD).
+* Execute with phased delivery (pilot screens, adapters, dual-run), with validation gates and rollback.
+
+3. **Assumptions:**
+
+* The legacy app is Swing on Java 8–11+, desktop-distributed, with meaningful business logic mixed into UI.
+* You can incrementally ship features (no big-bang cutover).
+* Non-functional needs (security, audit, accessibility) will be stricter in the target state.
+
+---
+
+# Things to consider when upgrading Swing → JavaFX or Web
+
+## A. Up-front assessment & decision matrix
+
+* **Functional map:** Screens, workflows, custom Swing components, keyboard shortcuts, printing, offline support.
+* **Tech inventory:** JDK version, 3rd-party components (e.g., old look-and-feel, chart libs), native/JNI, reporting, licensing.
+* **Non-functional:** Perf on high-DPI, accessibility, internationalization, security posture, audit/logging, compliance.
+* **Team skills & ops:** Java/Kotlin desktop vs JS/TypeScript web; CI/CD maturity; support model.
+* **Target platform**
+
+  * **JavaFX**: best when desktop modality, offline, device/USB, rich charts/media, reuse JVM code.
+  * **Web**: best for distribution-at-scale, multi-tenant, BYOD, easy updates, integration with SaaS/IdP.
+* **Scorecard criteria (weight them):** UX needs, offline/device access, release cadence, TCO, hiring pool, runtime constraints, performance, compliance, accessibility.
+
+## B. Architecture & codebase refactor (applies to both targets)
+
+* **Separate UI from domain:** Extract services/use-cases; move business logic out of listeners; introduce MVC/MVP/MVVM.
+* **Module boundaries:** Use JPMS/Gradle modules; create `core-logic`, `adapters-ui-swing`, `ports` (interfaces).
+* **Strangler pattern:** New UI calls adapters to old services; retire Swing screens incrementally.
+* **Eventing & async:** Replace Swing EDT coupling with agnostic async (CompletableFuture/Executor); avoid blocking UI threads.
+* **Validation & state:** Centralize validation, form state, and navigation flow; make them UI-agnostic.
+* **Testing:**
+
+  * Unit tests on domain (high coverage before refactor).
+  * Golden data sets & snapshot tests for critical calculations.
+  * Contract tests on adapters/ports.
+
+## C. If targeting **JavaFX**
+
+* **Threading model:** Swing’s EDT ≠ JavaFX Application Thread. Use `Platform.runLater` & background tasks; remove `SwingUtilities.*` calls.
+* **UI composition:** FXML + Controllers; prefer MVVM (Property/Binding API) for reactive UI; reuse domain as-is.
+* **Styling & theming:** CSS-like styles; replace Swing LAFs; check high-DPI and multi-monitor behavior.
+* **Component parity:** Replace custom Swing widgets with JavaFX controls or third-party; re-implement drag-drop/clipboard; check charts/media/WebView.
+* **Interop (optional bridge):** `JFXPanel` for embedding, or `SwingNode` to host legacy Swing during transition.
+* **Packaging & updates:** `jpackage` + runtime image (`jlink`), code signing (Windows MSI, macOS notarization), auto-update strategy (e.g., background updater).
+* **Accessibility:** JavaFX accessibility APIs; test with screen readers; keyboard navigation parity.
+* **Printing & reports:** Re-implement printing; consider JasperReports/BIRT replacements.
+
+## D. If targeting **Web-based UI**
+
+* **Backend split:** Turn the Swing app’s embedded logic into HTTP/JSON services (Spring Boot/Quarkus/Micronaut). Keep domain artifacts.
+* **UI framework:** SPA (React/Angular/Vue) or server-driven Java (Vaadin) if staying mostly in Java; consider design system for consistency.
+* **AuthN/Z:** OIDC/OAuth2 SSO, roles/claims, CSRF/CORS, session mgmt; map prior desktop users/roles → RBAC.
+* **State & workflows:** Convert modal desktop flows to non-blocking web flows; preserve keyboard power-user paths.
+* **Realtime/async:** WebSockets/SSE for live updates; background jobs & idempotency for long-running tasks.
+* **Binary & device access:** Replace local file/USB/serial access with backend services, native apps, or WebUSB/Serial (where feasible) + enterprise policy review.
+* **Accessibility & i18n:** WCAG 2.1 AA; RTL support; locale bundles.
+* **Observability:** Centralized logs (JSON), metrics, traces; client error telemetry; feature flags & A/B guards.
+* **Deployment:** CI/CD with rollbacks/blue-green; asset versioning; CDN; zero-downtime DB migrations.
+* **Reporting & printing:** Server-side PDFs, client print layouts; export formats (CSV/Excel/Parquet as needed).
+
+## E. Data & persistence
+
+* **DB migrations:** Introduce Flyway/Liquibase; untangle UI-driven SQL; add integration tests against containerized DB.
+* **Caching:** Move from in-process caches to distributed (if web); define eviction/TTL.
+* **Transaction boundaries:** Replace UI-scoped transactions with service-level, idempotent operations.
+
+## F. Security & compliance
+
+* **Secrets & config:** Externalize (env/params/secret stores); remove credentials baked in Swing.
+* **Hardening:** Input validation, output encoding, secure deserialization; review file handling and temp dirs.
+* **Audit trails:** Central audit for sensitive operations; immutable logs.
+* **Licensing:** Replace any non-web-compatible or paid Swing components; ensure license compliance.
+
+## G. Performance & UX parity
+
+* **Perf targets:** Cold start, input latency, render FPS; profile with JFR/Async Profiler (desktop) or Web vitals (web).
+* **Keyboard & productivity:** Preserve hotkeys and dense layouts; power-user mode; offline/low-latency strategies where needed.
+* **High-DPI & accessibility:** Crisp rendering, focus order, ARIA (web), large fonts.
+
+## H. Migration strategy (practical)
+
+1. **Spike both paths**: Build 1–2 complex screens in JavaFX and Web to de-risk (timebox 1–2 weeks). Measure cost, UX, perf.
+2. **Decide** with the scorecard; document trade-offs & sponsor sign-off.
+3. **Refactor core**: Extract domain/services; add tests; introduce ports/adapters.
+4. **Bridge & dual-run**:
+
+   * JavaFX path: embed with `JFXPanel`/`SwingNode` temporarily.
+   * Web path: ship backend services first; wrap legacy UI for new features via embedded browser or link-outs.
+5. **Iterate by feature slices**: Highest ROI screens first; telemetry + user feedback; retire Swing modules progressively.
+6. **Cutover**: Freeze legacy, data migration, training, rollback plan.
+
+## I. Common pitfalls
+
+* Rewriting pixel-perfect UIs 1:1 (costly; redesign for platform strengths).
+* Blocking the UI thread with I/O (both JavaFX & Web).
+* Forgetting printing/report parity until late.
+* Underestimating accessibility, keyboard shortcuts, and focus behavior.
+* Big-bang replacement without strangler and telemetry.
+* Ignoring installers/signing/notarization (desktop) or SSO/roles (web).
+
+## J. Quick code cues (threading)
+
+* **Swing → JavaFX:** replace `SwingUtilities.invokeLater(...)` with `Platform.runLater(...)`; push I/O to background `ExecutorService`.
+* **Web:** move blocking business logic to services; expose via REST; UI uses async calls and optimistic updates where safe.
+
+---
+
+4. **Validation (quick checks):**
+
+* Do you have a complete **component parity list** (every Swing widget mapped to JavaFX/Web equivalent or redesign)?
+* Is there a **pilot screen** delivered in both JavaFX and Web with measured perf and user feedback?
+* Is there a **rollback plan** and **telemetry** (logs/metrics/traces) in the new stack before wider rollout?
+
+5. **Next info needed (top 2):**
+
+* Your **must-have capabilities** (offline/device access, printing, hotkeys, security constraints) and any **compliance requirements**.
+* A shortlist of **candidate screens** to pilot (most complex + most used), plus any 3rd-party Swing components currently in use.
