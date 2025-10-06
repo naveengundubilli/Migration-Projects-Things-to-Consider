@@ -1,0 +1,337 @@
+1. **Intent check:** You want me to enrich the migration guide with clear pseudo-code examples and architecture diagram placeholders you can drop into a design doc (and later export to Word).
+
+2. **Plan:**
+
+* Add pseudo-code for ports/adapters, strangler pattern, threading, and data access (applies to both JavaFX and Web targets).
+* Add target-specific pseudo-code: JavaFX MVVM and Web (Spring Boot API + SPA consumption).
+* Insert ready-to-replace diagram placeholders (titles, captions, and optional Mermaid blocks).
+
+3. **Assumptions:**
+
+* You’ll paste this into **`Swing_to_JavaFX_or_Web_Migration_Strategy_Guide.docx`**.
+* You prefer language-agnostic pseudo-code first, then concrete Java where helpful.
+* Diagrams will be replaced later with proper tooling (draw.io/Lucid/PlantUML).
+
+---
+
+# Pseudo-code & Diagram Placeholders
+
+## 1) Core refactor (Ports & Adapters + Strangler)
+
+```pseudo
+// Domain Port: UI-agnostic business capability
+interface CustomerService {
+  Customer getCustomerById(CustomerId id)
+  Customer updateCustomerAddress(CustomerId id, Address newAddress)
+}
+
+// Application Service (use-cases)
+class CustomerUseCases(CustomerRepository repo, AddressValidator validator) {
+  Customer getCustomer(id) -> repo.findById(id)
+  Customer changeAddress(id, addr) {
+    validator.requireValid(addr)
+    return repo.updateAddress(id, addr)
+  }
+}
+
+// Adapters: existing Swing, new JavaFX, or Web REST all talk to the same port
+class SwingCustomerAdapter(CustomerUseCases svc) {
+  onViewButtonClick(idText) {
+    id = parseId(idText)
+    customer = svc.getCustomer(id)
+    view.render(customer)
+  }
+}
+
+class WebCustomerController(CustomerUseCases svc) {
+  GET /api/customers/{id} -> return Json.of(svc.getCustomer(id))
+  PUT /api/customers/{id}/address -> svc.changeAddress(id, request.body.address)
+}
+
+// Strangler: route by feature flag or screen registry
+class ScreenRouter {
+  Map<String, Screen> legacyScreens
+  Map<String, Screen> newScreens
+
+  Screen resolve(name) {
+    if (FeatureFlags.isEnabled("new."+name) && newScreens.contains(name)) return newScreens[name]
+    return legacyScreens[name]
+  }
+}
+```
+
+### Diagram Placeholder A — **“Strangler Fig Migration”**
+
+* **Caption:** “New routes intercept selected features and delegate to new UI; legacy remains until parity is achieved.”
+* **Suggested elements:** User → Router → [Legacy UI] / [New UI] → Ports → Domain → Adapters → DB
+* **(Optional Mermaid)**
+
+```mermaid
+flowchart LR
+  U[User] --> R[Screen Router]
+  R -->|legacy route| L[Legacy Swing UI]
+  R -->|new route| N[New UI (JavaFX/Web)]
+  L --> P1[Ports]
+  N --> P2[Ports]
+  P1 & P2 --> D[Domain Services]
+  D --> A[Adapters/Infra]
+  A --> DB[(Database)]
+```
+
+---
+
+## 2) Threading & Async (EDT → JavaFX/Web)
+
+```pseudo
+// Swing (before)
+onButtonClick() {
+  // BAD: blocks EDT
+  result = service.longRunningCall()
+  label.setText(result)
+}
+
+// Swing (after)
+onButtonClick() {
+  runAsync( service.longRunningCall )
+    .thenOnEDT( result -> label.setText(result) )
+}
+
+// JavaFX
+onButtonClick() {
+  runAsync( service.longRunningCall )
+    .thenOnFX( result -> label.setText(result) )
+}
+
+// Web (SPA)
+async function onClick() {
+  showSpinner(true)
+  try {
+    const result = await fetch("/api/doWork")
+    updateUI(await result.json())
+  } finally {
+    showSpinner(false)
+  }
+}
+```
+
+### Diagram Placeholder B — **“Threading Model Shift”**
+
+* **Caption:** “Move blocking I/O off the UI thread; update UI on framework thread (EDT/FX), or via async state in SPA.”
+* **Elements:** UI thread, worker pool, non-blocking I/O, UI update callback.
+
+---
+
+## 3) Data & Persistence (extract from UI)
+
+```pseudo
+// Domain Repository Port (UI agnostic)
+interface CustomerRepository {
+  Customer findById(CustomerId id)
+  Customer updateAddress(CustomerId id, Address addr)
+}
+
+// Infra Adapter (JPA/MyBatis/Plain JDBC)
+class JpaCustomerRepository(EntityManager em): CustomerRepository {
+  Customer findById(id) -> em.find(CustomerEntity, id).toDomain()
+  Customer updateAddress(id, addr) {
+    e = em.find(CustomerEntity, id)
+    e.street = addr.street
+    em.merge(e)
+    return e.toDomain()
+  }
+}
+```
+
+### Diagram Placeholder C — **“Domain, Ports, Adapters”**
+
+* **Caption:** “UI depends on ports; adapters implement ports; domain is isolated.”
+* **Elements:** UI(s) → Ports → Domain ← Adapters ← DB/External
+
+---
+
+## 4) Target: **JavaFX MVVM** example
+
+```java
+// Model (domain)
+public record Customer(String id, String name, Address address) {}
+
+// ViewModel (bindable state)
+public class CustomerVM {
+  private final StringProperty id = new SimpleStringProperty();
+  private final StringProperty name = new SimpleStringProperty();
+  private final StringProperty street = new SimpleStringProperty();
+  private final CustomerService service;
+
+  public CustomerVM(CustomerService service) { this.service = service; }
+
+  public void loadById(String idValue) {
+    CompletableFuture.supplyAsync(() -> service.getCustomerById(new CustomerId(idValue)))
+      .thenAcceptAsync(c -> {
+        id.set(c.id());
+        name.set(c.name());
+        street.set(c.address().street());
+      }, Platform::runLater);
+  }
+
+  public void saveAddress() {
+    var addr = new Address(street.get());
+    CompletableFuture.runAsync(() -> service.updateCustomerAddress(new CustomerId(id.get()), addr));
+  }
+}
+```
+
+```xml
+<!-- View (FXML excerpt) -->
+<TextField fx:id="idField"/>
+<Button text="Load" onAction="#onLoad"/>
+<TextField fx:id="streetField"/>
+<Button text="Save" onAction="#onSave"/>
+```
+
+```java
+// Controller (wires View <-> ViewModel)
+public class CustomerController {
+  @FXML private TextField idField;
+  @FXML private TextField streetField;
+  private CustomerVM vm;
+
+  public void initialize() {
+    streetField.textProperty().bindBidirectional(vm.streetProperty());
+  }
+  @FXML void onLoad() { vm.loadById(idField.getText()); }
+  @FXML void onSave() { vm.saveAddress(); }
+}
+```
+
+### Diagram Placeholder D — **“JavaFX MVVM Binding”**
+
+* **Caption:** “One-way/two-way bindings keep UI reactive; services stay off the FX thread.”
+* **Elements:** View ↔ ViewModel → Service Port → Domain
+
+---
+
+## 5) Target: **Web** (Spring Boot API + SPA)
+
+```java
+// Spring Boot REST Controller
+@RestController
+@RequestMapping("/api/customers")
+class CustomerController {
+  private final CustomerUseCases svc;
+
+  @GetMapping("/{id}")
+  CustomerDto get(@PathVariable String id) { return CustomerDto.of(svc.getCustomer(new CustomerId(id))); }
+
+  @PutMapping("/{id}/address")
+  CustomerDto update(@PathVariable String id, @RequestBody AddressDto body) {
+    var c = svc.changeAddress(new CustomerId(id), body.toDomain());
+    return CustomerDto.of(c);
+  }
+}
+```
+
+```typescript
+// SPA (React) data hook
+export function useCustomer(id: string) {
+  const [data, setData] = useState<Customer | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/customers/${id}`).then(r => r.json()).then(d => { if(!cancelled) setData(d); });
+    return () => { cancelled = true; }
+  }, [id]);
+  return data;
+}
+```
+
+### Diagram Placeholder E — **“Web Target Architecture”**
+
+* **Caption:** “SPA consumes REST; API layer maps to domain; adapters handle DB/integration; observability wraps all.”
+* **Elements:** Browser SPA ↔ API Gateway/Controller → Use Cases → Ports → Adapters → DB; Telemetry sidecar.
+
+---
+
+## 6) Security & AuthZ (both targets)
+
+```pseudo
+// Web: OIDC login flow
+User -> AuthN (/login) -> IdP (OIDC) -> ID Token/JWT -> App verifies -> roles/claims -> RBAC checks
+
+// Desktop: enterprise SSO
+App obtains token via device code or embedded browser; stores short-lived token in secure store; 
+sends token to APIs; refresh via refresh token or client credential (service) where appropriate.
+```
+
+### Diagram Placeholder F — **“AuthN/AuthZ Flow”**
+
+* **Caption:** “Central IdP issues tokens; app enforces RBAC at service boundary; sensitive ops are audited.”
+* **Elements:** User → IdP → Token → App/API → Policy Engine → Audit Log
+
+---
+
+## 7) Reporting & Printing parity
+
+```pseudo
+// Server-side PDF generation to replace desktop print dialogs
+POST /api/reports/customer/{id} -> returns application/pdf
+Client triggers window.print() for formatted HTML/PDF, or downloads artifact
+```
+
+### Diagram Placeholder G — **“Reporting Replacement”**
+
+* **Caption:** “Move print/report logic server-side for consistency and compliance.”
+
+---
+
+## 8) CI/CD & Packaging (Desktop vs Web)
+
+```pseudo
+// Desktop (JavaFX)
+- Build: gradle jlink + jpackage to produce platform installers (MSI/DMG)
+- Sign: code-sign certificates + notarization (macOS)
+- Update: background updater checks manifest.json, downloads signed delta
+
+// Web
+- Build: backend (Gradle/Maven), frontend (npm build)
+- Deploy: blue/green, DB migrations via Flyway/Liquibase
+- Observability: structured logs, metrics, traces; client error telemetry
+```
+
+### Diagram Placeholder H — **“Delivery Pipelines”**
+
+* **Caption:** “Versioned artifacts; blue/green (Web); signed installers (Desktop); rollout + rollback gates.”
+
+---
+
+## 9) Data Model & DTO mapping (quick example)
+
+```java
+// Domain
+record Address(String street) {}
+record CustomerId(String value) {}
+record Customer(String id, String name, Address address) {}
+
+// DTOs
+record AddressDto(String street) {
+  Address toDomain(){ return new Address(street); }
+}
+record CustomerDto(String id, String name, String street) {
+  static CustomerDto of(Customer c){ return new CustomerDto(c.id(), c.name(), c.address().street()); }
+}
+```
+
+---
+
+## 10) Risk Register (embed as table)
+
+* **R1: Component parity gaps** — Mitigation: spike replacements early; maintain parity list.
+* **R2: Printing/reporting not ready** — Mitigation: server-side PDF MVP by Milestone-2.
+* **R3: Threading regressions** — Mitigation: async audits + UI freeze tests.
+* **R4: Accessibility gaps** — Mitigation: WCAG audits each milestone.
+
+---
+
+4. **Validation (quick checks):**
+
+* Do the placeholders cover your **highest-risk areas** (threading, parity, printing, auth)?
+* Is there at least **one pseudo-code path per target** (JavaFX MVVM and Web API + SPA)?
+* Are the **diagram captions** concrete enough for a designer to implement without extra context?
